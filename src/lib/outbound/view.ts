@@ -18,6 +18,7 @@ export function quoteView(s: Shipment) {
     documents: docs?.available ?? null,
     selectedDocuments: docs?.selected ?? [],
     selectedRateId: (s.selectedRate as { rateId?: string } | null)?.rateId ?? null,
+    dutyPayer: (s.selectedRate as { dutyPayer?: "sender" | "receiver" } | null)?.dutyPayer ?? null,
     pickupOption: s.pickupOption,
     pricing: (s.pricing as PriceLine[] | null) ?? null,
     totalMinor: s.totalMinor,

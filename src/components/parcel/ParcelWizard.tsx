@@ -24,6 +24,8 @@ async function api<T>(url: string, body?: unknown): Promise<T> {
   return json as T;
 }
 
+// Shipping price without estimated duties: those are chosen separately (pay now or receiver pays)
+const shippingOnly = (r: QuotedRate) => r.customerFromMinor - (r.dutyStatus === "estimated" ? (r.dutyMinor ?? 0) : 0);
 const days = (r: QuotedRate) => Number(/(\d+)/.exec(r.deliveryTime ?? "")?.[1] ?? 99);
 const OPTION_LABEL: Record<string, string> = {
   pickup: "Courier pickup",
@@ -60,6 +62,7 @@ function Wizard({ saved = [], signedIn, resumeId, basePath }: WizardProps) {
   const [sort, setSort] = useState<"cheapest" | "fastest">("cheapest");
   const [rateId, setRateId] = useState<string | null>(null);
   const [insurance, setInsurance] = useState(false);
+  const [dutyPayer, setDutyPayer] = useState<"sender" | "receiver">("receiver");
   const [option, setOption] = useState<string>("pickup");
   const [dropoffs, setDropoffs] = useState<{ id: string; address: string; city: string }[] | null>(null);
   const [dropoffId, setDropoffId] = useState("");
@@ -87,6 +90,7 @@ function Wizard({ saved = [], signedIn, resumeId, basePath }: WizardProps) {
       .then((q) => {
         setQuote(q);
         setRateId(q.selectedRateId);
+        if (q.dutyPayer) setDutyPayer(q.dutyPayer);
         if (resumeId) replaceStep(q.pricing ? 5 : 3);
       })
       .catch(() => undefined) // expired or already paid: the form stays at the details
@@ -109,7 +113,7 @@ function Wizard({ saved = [], signedIn, resumeId, basePath }: WizardProps) {
 
   const sortedRates = useMemo(() => {
     const list = [...(quote?.rates ?? [])];
-    return sort === "cheapest" ? list.sort((a, b) => a.customerFromMinor - b.customerFromMinor) : list.sort((a, b) => days(a) - days(b));
+    return sort === "cheapest" ? list.sort((a, b) => shippingOnly(a) - shippingOnly(b)) : list.sort((a, b) => days(a) - days(b));
   }, [quote, sort]);
 
   const go = (s: Step) => {
@@ -215,6 +219,7 @@ function Wizard({ saved = [], signedIn, resumeId, basePath }: WizardProps) {
         pickupDate: option === "scheduled_pickup" ? pickupDate : undefined,
         insurance,
         documents: [],
+        dutyPayer,
       });
       setQuote(q);
       go(5);
@@ -288,7 +293,7 @@ function Wizard({ saved = [], signedIn, resumeId, basePath }: WizardProps) {
       )}
 
       {view === 3 && quote && (
-        <Section title="Pick a carrier" subtitle={quote.international ? "Prices include estimated import duties at the destination." : undefined}>
+        <Section title="Pick a carrier" subtitle={quote.international ? "Prices are for shipping. You'll choose who pays import duties next." : undefined}>
           <div className="mb-4 inline-flex rounded-xl bg-mist p-1 text-sm font-semibold">
             {(["cheapest", "fastest"] as const).map((s) => (
               <button key={s} type="button" onClick={() => setSort(s)} className={`rounded-lg px-4 py-2 capitalize ${sort === s ? "bg-white text-navy shadow-sm" : "text-navy/60"}`}>
@@ -309,10 +314,11 @@ function Wizard({ saved = [], signedIn, resumeId, basePath }: WizardProps) {
                   <div className="min-w-0 flex-1">
                     <p className="font-semibold text-navy">{r.carrierName}</p>
                     <p className="truncate text-xs text-navy/60">{[r.description, r.deliveryTime].filter(Boolean).join(" · ")}</p>
-                    {r.dutyStatus === "estimated" && <p className="text-xs text-navy/60">incl. {formatMoney(r.dutyMinor ?? 0)} duties</p>}
-                    {r.dutyStatus === "unavailable" && <p className="text-xs text-danger">Duties couldn&apos;t be estimated; paid by the receiver</p>}
+                    {r.dutyStatus === "estimated" && <p className="text-xs text-navy/60">Import duties about {formatMoney(r.dutyMinor ?? 0)}: pay now or the receiver pays</p>}
+                    {r.dutyStatus === "included" && <p className="text-xs text-navy/60">Import duties included</p>}
+                    {r.dutyStatus === "unavailable" && <p className="text-xs text-navy/60">Import duties paid by the receiver on delivery</p>}
                   </div>
-                  <p className="text-right text-lg font-bold text-navy">{formatMoney(r.customerFromMinor)}</p>
+                  <p className="text-right text-lg font-bold text-navy">{formatMoney(shippingOnly(r))}</p>
                 </button>
               </li>
             ))}
@@ -386,6 +392,26 @@ function Wizard({ saved = [], signedIn, resumeId, basePath }: WizardProps) {
             </p>
           )}
 
+          {rate.dutyStatus === "estimated" && (
+            <fieldset className="mt-6 space-y-2">
+              <legend className="label">Import duties and taxes</legend>
+              {(
+                [
+                  ["receiver", "Receiver pays on delivery", "The carrier collects duties from the receiver before handing over the parcel."],
+                  ["sender", `Pay now: about ${formatMoney(rate.dutyMinor ?? 0)}`, "Added to your total, so the receiver pays nothing on arrival."],
+                ] as const
+              ).map(([value, title, hint]) => (
+                <label key={value} className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 ${dutyPayer === value ? "border-purple bg-purple/5" : "border-silver"}`}>
+                  <input type="radio" name="duty" className="mt-1" checked={dutyPayer === value} onChange={() => setDutyPayer(value)} />
+                  <span>
+                    <span className="block text-sm font-semibold text-navy">{title}</span>
+                    <span className="text-xs text-navy/60">{hint}</span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
+          )}
+
           <Nav onBack={() => go(3)} onNext={confirmExtras} nextLabel="Review" busy={busy} />
         </Section>
       )}
@@ -393,6 +419,9 @@ function Wizard({ saved = [], signedIn, resumeId, basePath }: WizardProps) {
       {view === 5 && quote?.pricing && (
         <Section title="Review and pay" subtitle={`Quote ${quote.code}`}>
           <div className="card space-y-2">
+            {quote.international && (quote.dutyPayer === "receiver" || rate?.dutyStatus === "unavailable") && (
+              <p className="text-xs text-navy/60">Import duties and taxes are paid by the receiver on delivery.</p>
+            )}
             {quote.pricing.map((l) => (
               <div key={l.key} className="flex justify-between text-sm">
                 <span className="text-navy/70">{l.label}</span>

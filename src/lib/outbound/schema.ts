@@ -48,6 +48,8 @@ export const selectSchema = z.object({
   pickupDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   insurance: z.boolean(),
   documents: z.array(z.string()).default([]),
+  // International only: duties paid now (in our price) or by the receiver on delivery (the default)
+  dutyPayer: z.enum(["sender", "receiver"]).optional(),
 });
 export type SelectInput = z.infer<typeof selectSchema>;
 

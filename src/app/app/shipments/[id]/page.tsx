@@ -41,6 +41,7 @@ export default async function ShipmentPage({ params, searchParams }: PageProps<"
   const from = s.fromAddress as Addr | null;
   const to = s.toAddress as Addr | null;
   const pricing = (s.pricing as PriceLine[] | null) ?? [];
+  const receiverPaysDuty = (s.selectedRate as { dutyPayer?: string } | null)?.dutyPayer === "receiver";
   const regDocs = s.regulatoryDocs as { available?: { type: string; name: string; minor: number; free: boolean }[]; purchased?: { name: string; document_url?: string }[] } | null;
   const docs = regDocs?.purchased ?? [];
   const docsToBuy = !docs.length ? (regDocs?.available ?? []) : [];
@@ -220,6 +221,7 @@ export default async function ShipmentPage({ params, searchParams }: PageProps<"
             <span>Total</span>
             <span>{formatMoney(s.totalMinor ?? 0, s.currency)}</span>
           </div>
+          {receiverPaysDuty && <p className="pt-1 text-xs text-navy/60">Import duties and taxes are paid by the receiver on delivery.</p>}
         </div>
       )}
 

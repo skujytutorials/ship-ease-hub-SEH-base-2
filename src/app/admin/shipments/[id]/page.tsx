@@ -5,7 +5,7 @@ import { formatMoney } from "@/lib/money";
 import { STATUS } from "@/lib/status";
 import { getWebhookDeliveries } from "@/lib/terminal/api";
 import type { PriceLine } from "@/lib/outbound/pricing";
-import type { QuotedRate } from "@/lib/outbound/service";
+import { dutyPaidNow, type SelectedRate } from "@/lib/outbound/service";
 import { StatusChip } from "@/components/Status";
 import { EventList } from "@/components/EventList";
 import { ActionButton } from "../../ActionButton";
@@ -26,11 +26,11 @@ export default async function AdminShipment({ params }: PageProps<"/admin/shipme
   });
   if (!s) notFound();
 
-  const rate = s.selectedRate as QuotedRate | null;
+  const rate = s.selectedRate as SelectedRate | null;
   const pricing = (s.pricing as PriceLine[] | null) ?? [];
   const deliveries = s.terminalShipmentId && s.status !== STATUS.DRAFT ? await safe(() => getWebhookDeliveries({ shipment_id: s.terminalShipmentId!, perPage: 20 })) : {};
   const deliveryEvents = ((deliveries.data as { events?: { webhook_event_id: string; event: string; created_at: string; deliveries?: { status: string; http_status?: number }[] }[] } | undefined)?.events) ?? [];
-  const terminalCost = rate ? rate.shippingMinor + (rate.dutyMinor ?? 0) : 0;
+  const terminalCost = rate ? rate.shippingMinor + (dutyPaidNow(rate) ? (rate.dutyMinor ?? 0) : 0) : 0;
 
   return (
     <div className="space-y-4">

@@ -30,6 +30,12 @@ export type QuotedRate = {
   customerFromMinor: number; // shipping (with markup) + duty
 };
 
+/** The rate the customer chose. dutyPayer is set when duties were estimated (international). */
+export type SelectedRate = QuotedRate & { dutyPayer?: "sender" | "receiver" };
+
+/** Whether SEH collected the duty and so pays it on Terminal (older shipments: whenever there was one). */
+export const dutyPaidNow = (r: SelectedRate) => (r.dutyPayer ? r.dutyPayer === "sender" : true) && Boolean(r.dutyMinor);
+
 export type StoredQuote = {
   international: boolean;
   insurancePremiumMinor: number;
@@ -244,10 +250,14 @@ export async function selectRate(shipment: Shipment, input: SelectInput) {
   const docs = (shipment.regulatoryDocs as { available?: { type: string; name: string; minor: number }[] } | null)?.available ?? [];
   const chosenDocs = docs.filter((d) => input.documents.includes(d.type));
 
+  // Estimated duties are the customer's choice; receiver pays unless they choose to pay now
+  const selected: SelectedRate =
+    rate.dutyStatus === "estimated" ? { ...rate, dutyPayer: input.dutyPayer === "sender" ? "sender" : "receiver" } : rate;
+
   const price = buildPrice(
     {
       shippingMinor: rate.shippingMinor,
-      dutyMinor: rate.dutyMinor,
+      dutyMinor: dutyPaidNow(selected) ? rate.dutyMinor : null,
       insuranceMinor: input.insurance && !rate.insuranceIncluded ? quote.insurancePremiumMinor : 0,
       priorityPickupMinor: option === "priority_pickup" ? rate.priorityPickupMinor : 0,
       documents: chosenDocs.map((d) => ({ name: d.name, minor: d.minor })),
@@ -258,7 +268,7 @@ export async function selectRate(shipment: Shipment, input: SelectInput) {
   return db.shipment.update({
     where: { id: shipment.id },
     data: {
-      selectedRate: rate as unknown as Prisma.InputJsonValue,
+      selectedRate: selected as unknown as Prisma.InputJsonValue,
       pickupOption: option,
       dropoffId: option === "dropoff" ? input.dropoffId : null,
       pickupDate: option === "scheduled_pickup" ? input.pickupDate : null,
@@ -287,7 +297,7 @@ export async function bookPaidShipment(shipmentId: string) {
   if (claimed.count === 0) return db.shipment.findUniqueOrThrow({ where: { id: shipmentId } });
 
   const shipment = await db.shipment.findUniqueOrThrow({ where: { id: shipmentId } });
-  const rate = shipment.selectedRate as unknown as QuotedRate;
+  const rate = shipment.selectedRate as unknown as SelectedRate;
 
   try {
     const booked = await terminal.arrangePickupAndDelivery({
@@ -295,8 +305,8 @@ export async function bookPaidShipment(shipmentId: string) {
       shipment_id: shipment.terminalShipmentId!,
       pickup_option: shipment.pickupOption as PickupOption["type"],
       dropoff_id: shipment.dropoffId ?? undefined,
-      // We collected the estimated duty from the customer, so we (the account holder) pay it
-      duty_payer: rate.dutyMinor ? "account_holder" : "receiver",
+      // If we collected the estimated duty from the customer, we (the account holder) pay it
+      duty_payer: dutyPaidNow(rate) ? "account_holder" : "receiver",
       purchase_insurance: shipment.withInsurance,
     });
 
