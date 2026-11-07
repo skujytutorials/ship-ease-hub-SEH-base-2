@@ -37,6 +37,28 @@ export function useCountries() {
   return countries;
 }
 
+export function useStates(country: string) {
+  const [states, setStates] = useState<{ code: string; name: string }[]>([]);
+  useEffect(() => {
+    if (!country) return;
+    getJson<{ code: string; name: string }[]>(`/api/terminal/states?country=${country}`)
+      .then(setStates)
+      .catch(() => setStates([]));
+  }, [country]);
+  return states;
+}
+
+export function useCities(country: string, stateCode?: string) {
+  const [cities, setCities] = useState<string[]>([]);
+  useEffect(() => {
+    if (!country || !stateCode) return;
+    getJson<string[]>(`/api/terminal/cities?country=${country}&state=${stateCode}`)
+      .then(setCities)
+      .catch(() => setCities([]));
+  }, [country, stateCode]);
+  return cities;
+}
+
 export function AddressFields({
   value,
   onChange,
@@ -52,23 +74,8 @@ export function AddressFields({
   saved?: SavedAddress[];
   idPrefix: string;
 }) {
-  const [states, setStates] = useState<{ code: string; name: string }[]>([]);
-  const [cities, setCities] = useState<string[]>([]);
-  const stateCode = states.find((s) => s.name === value.state)?.code;
-
-  useEffect(() => {
-    if (!value.country) return;
-    getJson<{ code: string; name: string }[]>(`/api/terminal/states?country=${value.country}`)
-      .then(setStates)
-      .catch(() => setStates([]));
-  }, [value.country]);
-
-  useEffect(() => {
-    if (!value.country || !stateCode) return;
-    getJson<string[]>(`/api/terminal/cities?country=${value.country}&state=${stateCode}`)
-      .then(setCities)
-      .catch(() => setCities([]));
-  }, [value.country, stateCode]);
+  const states = useStates(value.country);
+  const cities = useCities(value.country, states.find((s) => s.name === value.state)?.code);
 
   const set = (patch: Partial<AddressForm>) => onChange({ ...value, ...patch });
   const id = (f: string) => `${idPrefix}-${f}`;

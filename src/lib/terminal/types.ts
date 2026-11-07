@@ -69,6 +69,7 @@ export type ParcelInput = {
   rec_docs?: string[];
 };
 export type Parcel = ParcelInput & Extra & { parcel_id: string; total_weight?: number; totalWeight?: number };
+export type QuickAddress = { city: string; state: string; country: string; zip?: string };
 
 export type ShipmentPurpose = "commercial" | "personal" | "sample" | "return-after-repair" | "return-for-repair";
 

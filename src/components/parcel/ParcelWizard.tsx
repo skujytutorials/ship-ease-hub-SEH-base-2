@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { addressSchema, type AddressForm } from "@/lib/outbound/schema";
 import type { QuoteView } from "@/lib/outbound/view";
 import type { QuotedRate } from "@/lib/outbound/service";
 import { formatMoney } from "@/lib/money";
 import { AddressFields, emptyAddress, useCountries, type SavedAddress } from "./AddressFields";
 import { ParcelEditor, emptyItem, type PackagingOption, type ParcelDraft } from "./ParcelEditor";
+import { clearDraft, pushStep, readDraft, replaceStep, useMounted, writeDraft } from "./draft";
 
 const STEPS = ["From", "To", "Contents", "Rate", "Extras", "Pay"] as const;
 type Step = 0 | 1 | 2 | 3 | 4 | 5;
@@ -31,27 +32,31 @@ const OPTION_LABEL: Record<string, string> = {
   dropoff: "I'll drop it off",
 };
 
-export function ParcelWizard({
-  saved = [],
-  signedIn,
-  resumeId,
-  basePath,
-}: {
+type WizardProps = {
   saved?: SavedAddress[];
   signedIn: boolean;
   resumeId?: string;
   basePath: string; // page this wizard lives on, used to come back after sign-in
-}) {
+};
+
+// The saved draft lives in localStorage, so the form renders only in the browser
+export function ParcelWizard(props: WizardProps) {
+  return useMounted() ? <Wizard {...props} /> : <p className="py-10 text-center text-sm text-navy/60">Loading…</p>;
+}
+
+function Wizard({ saved = [], signedIn, resumeId, basePath }: WizardProps) {
   const router = useRouter();
   const countries = useCountries();
-  const [step, setStep] = useState<Step>(0);
-  const [from, setFrom] = useState<AddressForm>(emptyAddress("NG"));
-  const [to, setTo] = useState<AddressForm>(emptyAddress("GB"));
-  const [save, setSave] = useState({ from: false, to: false });
-  const [purpose, setPurpose] = useState<"personal" | "commercial" | "sample">("personal");
+  const [draft] = useState(() => readDraft(basePath));
+  const [from, setFrom] = useState<AddressForm>(draft?.from ?? emptyAddress("NG"));
+  const [to, setTo] = useState<AddressForm>(draft?.to ?? emptyAddress("GB"));
+  const [save, setSave] = useState(draft?.save ?? { from: false, to: false });
+  const [purpose, setPurpose] = useState<"personal" | "commercial" | "sample">(draft?.purpose ?? "personal");
   const [packaging, setPackaging] = useState<PackagingOption[]>([]);
-  const [parcels, setParcels] = useState<ParcelDraft[]>([]);
+  const [parcels, setParcels] = useState<ParcelDraft[]>(draft?.parcels ?? []);
   const [quote, setQuote] = useState<QuoteView | null>(null);
+  const quoteToLoad = resumeId ?? draft?.quoteId;
+  const [loadingQuote, setLoadingQuote] = useState(Boolean(quoteToLoad));
   const [sort, setSort] = useState<"cheapest" | "fastest">("cheapest");
   const [rateId, setRateId] = useState<string | null>(null);
   const [insurance, setInsurance] = useState(false);
@@ -64,29 +69,42 @@ export function ParcelWizard({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Packaging presets from Terminal
+  // Packaging presets from Terminal (boxes started from a quick price have none yet)
   useEffect(() => {
     api<PackagingOption[]>("/api/terminal/packaging")
       .then((p) => {
         setPackaging(p);
-        setParcels((cur) => (cur.length ? cur : [{ packaging: p[0]?.id ?? "", items: [emptyItem()] }]));
+        const preset = p[0]?.id ?? "";
+        setParcels((cur) => (cur.length ? cur.map((x) => (x.packaging ? x : { ...x, packaging: preset })) : [{ packaging: preset, items: [emptyItem()] }]));
       })
       .catch((e) => setError(e.message));
   }, []);
 
-  // Coming back from sign-in: reload the quote and continue where we left off
+  // Reload the last quote: coming back from sign-in, or after a refresh
   useEffect(() => {
-    if (!resumeId) return;
-    api<QuoteView>(`/api/parcel/${resumeId}`)
+    if (!quoteToLoad) return;
+    api<QuoteView>(`/api/parcel/${quoteToLoad}`)
       .then((q) => {
         setQuote(q);
         setRateId(q.selectedRateId);
-        setStep(q.pricing ? 5 : 3);
+        if (resumeId) replaceStep(q.pricing ? 5 : 3);
       })
-      .catch(() => undefined);
-  }, [resumeId]);
+      .catch(() => undefined) // expired or already paid: the form stays at the details
+      .finally(() => setLoadingQuote(false));
+  }, [quoteToLoad, resumeId]);
+
+  // Keep the draft up to date as the customer types
+  useEffect(() => {
+    writeDraft(basePath, { from, to, purpose, parcels, save, quoteId: quote?.id });
+  }, [basePath, from, to, purpose, parcels, save, quote]);
 
   const rate = quote?.rates.find((r) => r.rateId === rateId) ?? null;
+  // The step lives in the URL (?step=), so the browser's Back button goes to the previous step.
+  // Steps after "Contents" need a quote (and a carrier for "Extras"); fall back if it's missing.
+  const wanted = Math.min(5, Math.max(0, Number(useSearchParams().get("step")) || 0));
+  const reachable = !quote ? 2 : quote.pricing ? 5 : rate ? 4 : 3;
+  const step = Math.min(wanted, reachable) as Step;
+  const view = loadingQuote && wanted > reachable ? null : step; // nothing until the saved quote is back
   const international = to.country !== "NG" || Boolean(quote?.international);
 
   const sortedRates = useMemo(() => {
@@ -96,9 +114,23 @@ export function ParcelWizard({
 
   const go = (s: Step) => {
     setError(null);
-    setStep(s);
+    pushStep(s);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
+
+  function startOver() {
+    clearDraft(basePath);
+    window.location.href = basePath;
+  }
+
+  // Changing the details after prices were fetched makes that quote stale
+  const edit =
+    <V,>(set: (v: V) => void) =>
+    (v: V) => {
+      set(v);
+      setQuote(null);
+      setRateId(null);
+    };
 
   function checkAddress(a: AddressForm, next: Step) {
     const r = addressSchema.safeParse(a);
@@ -202,6 +234,7 @@ export function ParcelWizard({
     setBusy("Taking you to secure payment…");
     try {
       const { url } = await api<{ url: string }>(`/api/parcel/${quote.id}/pay`, { acceptTerms: accept });
+      clearDraft(basePath); // the shipment page takes over from here
       window.location.href = url;
     } catch (e) {
       const err = e as Error & { status?: number };
@@ -214,41 +247,47 @@ export function ParcelWizard({
   return (
     <div className="mx-auto w-full max-w-2xl">
       <Stepper step={step} onJump={(s) => s < step && s <= 2 && !quote?.pricing && go(s as Step)} />
+      <div className="-mt-3 mb-4 flex justify-between text-xs text-navy/50">
+        <span>Your progress is saved on this device.</span>
+        <button type="button" className="font-semibold text-purple hover:underline" onClick={startOver}>Start again</button>
+      </div>
 
       {error && <p className="mb-4 rounded-xl bg-danger/10 px-4 py-3 text-sm text-danger" role="alert">{error}</p>}
 
-      {step === 0 && (
+      {view === null && <p className="py-10 text-center text-sm text-navy/60">Loading your quote…</p>}
+
+      {view === 0 && (
         <Section title="Where is it coming from?" subtitle="Pickup address in Nigeria.">
-          <AddressFields idPrefix="from" value={from} onChange={setFrom} countries={countries} lockCountry saved={saved} />
+          <AddressFields idPrefix="from" value={from} onChange={edit(setFrom)} countries={countries} lockCountry saved={saved} />
           {signedIn && <SaveToggle checked={save.from} onChange={(v) => setSave({ ...save, from: v })} />}
           <Nav onNext={() => checkAddress(from, 1)} />
         </Section>
       )}
 
-      {step === 1 && (
+      {view === 1 && (
         <Section title="Where is it going?" subtitle="Any country, or anywhere in Nigeria.">
-          <AddressFields idPrefix="to" value={to} onChange={setTo} countries={countries} saved={saved} />
+          <AddressFields idPrefix="to" value={to} onChange={edit(setTo)} countries={countries} saved={saved} />
           {signedIn && <SaveToggle checked={save.to} onChange={(v) => setSave({ ...save, to: v })} />}
           <Nav onBack={() => go(0)} onNext={checkDestination} busy={busy} />
         </Section>
       )}
 
-      {step === 2 && (
+      {view === 2 && (
         <Section title="What's in it?" subtitle={international ? "Customs need a clear description, value and category for each item." : "Tell us what you're sending."}>
           <div className="mb-4">
             <label className="label" htmlFor="purpose">Reason for sending</label>
-            <select id="purpose" className="input" value={purpose} onChange={(e) => setPurpose(e.target.value as typeof purpose)}>
+            <select id="purpose" className="input" value={purpose} onChange={(e) => edit(setPurpose)(e.target.value as typeof purpose)}>
               <option value="personal">Personal / gift</option>
               <option value="commercial">Sale to a customer</option>
               <option value="sample">Sample</option>
             </select>
           </div>
-          <ParcelEditor parcels={parcels} onChange={setParcels} packaging={packaging} international={international} />
+          <ParcelEditor parcels={parcels} onChange={edit(setParcels)} packaging={packaging} international={international} />
           <Nav onBack={() => go(1)} onNext={getRates} nextLabel="See prices" busy={busy} />
         </Section>
       )}
 
-      {step === 3 && quote && (
+      {view === 3 && quote && (
         <Section title="Pick a carrier" subtitle={quote.international ? "Prices include estimated import duties at the destination." : undefined}>
           <div className="mb-4 inline-flex rounded-xl bg-mist p-1 text-sm font-semibold">
             {(["cheapest", "fastest"] as const).map((s) => (
@@ -282,7 +321,7 @@ export function ParcelWizard({
         </Section>
       )}
 
-      {step === 4 && quote && rate && (
+      {view === 4 && quote && rate && (
         <Section title="Pickup and protection" subtitle={`${rate.carrierName} · ${rate.deliveryTime ?? ""}`}>
           <fieldset className="space-y-2">
             <legend className="label">How should the courier get it?</legend>
@@ -351,7 +390,7 @@ export function ParcelWizard({
         </Section>
       )}
 
-      {step === 5 && quote?.pricing && (
+      {view === 5 && quote?.pricing && (
         <Section title="Review and pay" subtitle={`Quote ${quote.code}`}>
           <div className="card space-y-2">
             {quote.pricing.map((l) => (

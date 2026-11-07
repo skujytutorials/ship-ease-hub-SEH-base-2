@@ -75,6 +75,13 @@ export const getRatesForShipment = (q: { shipment_id: string; currency?: T.Curre
 export const getRatesForMultiParcel = (body: { shipment_id?: string; parcels?: string[]; pickup_address?: string; delivery_address?: string; currency?: T.Currency }) =>
   req<T.Rate[]>("POST", "/rates/multi/shipment", { body });
 export const getRate = (id: string) => req<T.Rate>("GET", `/rates/${id}`);
+/** Quick prices from city/state/country and weight. Nothing is created, so these rates can't be booked. */
+export const getQuickQuotes = (body: {
+  pickup_address: T.QuickAddress;
+  delivery_address: T.QuickAddress;
+  parcel: Omit<T.ParcelInput, "packaging">;
+  currency?: T.Currency;
+}) => req<T.Rate[]>("POST", "/rates/shipment/quotes", { body: { ...body, persist_data: false } });
 
 // ---------- Duties ----------
 export const estimateDuty = (body: { shipment_id: string; carrier: string; currency?: T.Currency }) =>
